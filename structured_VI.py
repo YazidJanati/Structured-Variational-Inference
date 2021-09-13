@@ -6,6 +6,7 @@ from torch.distributions import MultivariateNormal as MVN
 import math
 import pdb
 import matplotlib.pyplot as plt
+ 
 
 torch.autograd.set_detect_anomaly(False)
 
@@ -20,7 +21,7 @@ class var_triple:
         #print(self.learning_rate)
         #HMM parameters
         self.F = args['F']
-        self.F.requires_grad = False
+        self.F.requires_grad = True
         self.H = args['H'] 
         self.H.requires_grad = False
         #self.H.double()
@@ -31,7 +32,7 @@ class var_triple:
         #self.R.requires_grad = False
         #pr_r_1 need not be softmaxed
         self.pr_r_1 = args['pr_r_1'] 
-        self.pr_r_1.requires_grad = False
+        self.pr_r_1.requires_grad = True
         self.pr_0 = args['pr_0']
         
         self.inv_Q = torch.inverse(self.Q)
@@ -68,12 +69,12 @@ class var_triple:
         C_x, D_x, cte_x, sigma_x, B_y, cte_y, sigma_y, qr_0, qr_r_1""" 
 
         chol_Q = torch.cholesky(self.Q)
-        self.tril_Q = self._triu_to_vect(chol_Q).requires_grad_()
+        self.tril_Q = self._triu_to_vect(chol_Q).requires_grad_(True)
         triu = self._vect_to_triu(self.tril_Q, self.dim_x)
         self.Q = (triu @ triu.transpose(-1,-2)).double()
 
         chol_R = torch.cholesky(self.R)
-        self.tril_R = self._triu_to_vect(chol_R)[0].requires_grad_()
+        self.tril_R = self._triu_to_vect(chol_R)[0].requires_grad_(True)
         triu = self._vect_to_triu(self.tril_R.repeat(self.K,1), self.dim_y)
         self.R = (triu @ triu.transpose(-1,-2)).double()
 
@@ -83,9 +84,9 @@ class var_triple:
         self.D_x = args['D_x']
         self.D_x.requires_grad = True
         self.D_prime_x = args['D_prime_x']
-        self.D_prime_x.requires_grad = True
+        self.D_prime_x.requires_grad = False
         self.cte_x = args['cte_x']
-        self.cte_x.requires_grad = True
+        self.cte_x.requires_grad = False
 
         self.chol_sigma_x = torch.cholesky(args['sigma_x'])
         self.tril_sigma_x = self._triu_to_vect(self.chol_sigma_x).requires_grad_()
@@ -95,7 +96,7 @@ class var_triple:
         self.B_y = args['B_y']
         self.B_y.requires_grad = True
         self.cte_y = args['cte_y']
-        self.cte_y.requires_grad = True
+        self.cte_y.requires_grad = False
 
         self.chol_sigma_y = torch.cholesky(args['sigma_y'])
         self.tril_sigma_y = self._triu_to_vect(self.chol_sigma_y).requires_grad_()
@@ -103,7 +104,7 @@ class var_triple:
         self.sigma_y = (self.triu @ self.triu.transpose(-1,-2)).double()
 
         self.qr_0 = args['qr_0']
-        self.qr_0.requires_grad = True
+        self.qr_0.requires_grad = False
         self.qr_r_1 = args['qr_r_1']
         self.qr_r_1.requires_grad = True
 
@@ -124,7 +125,7 @@ class var_triple:
         self.inv_Q = torch.inverse(self.Q)
         self.inv_R = torch.inverse(self.R)
 
-        self.parameters = [self.C_x, self.D_x, self.tril_sigma_x, self.tril_Q, self.tril_R,
+        self.parameters = [self.C_x, self.D_x, self.D_prime_x, self.cte_x, self.cte_y, self.tril_sigma_x, self.tril_Q, self.tril_R,
                            self.tril_sigma_y, self.B_y, self.qr_0, self.qr_r_1,self.F,self.H,self.pr_r_1]
 
     
@@ -188,6 +189,7 @@ class var_triple:
         """
         #pdb.set_trace()
         """Here we compute q(r_0 | y_0) = q(y_0 | r_0)q(r_0) / q(y_0)"""
+        #print(self.sigma_y)
         log_qrGy = MVN(self.cte_y, self.sigma_y).log_prob(self.observations[:,0]).view(-1,1) \
                        + torch.softmax(self.qr_0, 0).log()
         #print(torch.softmax(self.qr_0,0).log())
@@ -200,7 +202,7 @@ class var_triple:
         log_jump_cond = torch.softmax(self.qr_r_1,0).log()
         
         log_qy = log_qy_t
-        log_qrGy = self.pr_0.flatten().log().unsqueeze(1)
+        log_qrGy = self.qr_0.flatten().log().unsqueeze(1)
 
         for t in range(1,self.T):
                   
@@ -379,13 +381,13 @@ class var_triple:
         log_qr0_T = joint_smoothing[0].logsumexp(0)
         #print(log_qr0_T.exp())
         dkl0 = torch.sum(log_qr0_T.exp().unsqueeze(-1) * (log_qr0_T.unsqueeze(-1) - self.pr_0.log()))
-        dkl = dkl0 + (joint_smoothing.exp() * (log_qrGry - self.pr_r_1.softmax(0))).sum()
+        dkl = dkl0 + (joint_smoothing.exp() * (log_qrGry - self.pr_r_1.softmax(0).log())).sum()
         
         return dkl 
 
     def KL(self):
         
-        log_qrGy, log_qy = self._conditionals_r()
+        log_qrGy, log_qy = self._conditionals_r2()
 
         log_jump_joint_smooth = self._joint_smoothing_jump(log_qrGy)
         #smoothing : r_k, r_k-1 | y_0:T
@@ -412,34 +414,54 @@ class var_triple:
         
         #print('dkl_cont',dkl_cont)
         #print('dkl_discr',dkl_discr)
-        return dkl_cont + dkl_discr, MSE
+        return dkl_cont , dkl_discr, MSE
         
     def train(self, iterations, plot = False):
 
-        self.optimizer = torch.optim.SGD(self.parameters, lr = self.learning_rate) 
-        print('SGD')
+        
         #print(self.learning_rate)
         div_prec=10**10
+        MSE_prec=10**10
+        #scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=500, gamma=0.1)
         for i in tqdm(range(iterations)):
-            print(f'iter : {i}/{iterations}')
+            #print(self.optimizer)
             self.optimizer.zero_grad()
-            div, MSE = self.KL()
-            div = div / self.T
-            
-            """if div<div_prec:
+            div_cont,div_discrete, MSE = self.KL()
+            div=div_cont+div_discrete
+            if div<div_prec:
+                
+                #model_state = {'model': self, 'optimizer': self.optimizer.state_dict()}
+                #torch.save(model_state,"save_self")
                 torch.save(self,"save_self")
-                div_prec=div"""
+                div_prec=div
+                
+            
+            if (i>250):
+                self.optimizer.param_groups[0]['lr']=1e-2
+               
+          
             
             if i%10==0:
-                print(f'\ndivergence : {div}\nMSE: {MSE}')
+                print(f'\ndiv_discrete: {div_discrete} div_continue: {div_cont} \ndivergence : {div}\nMSE: {MSE}')
                
 
             self.divergence_values.append(div.item())
             self.mean_squared_error.append(MSE.item())
-            div.backward(retain_graph = True)
-
+            
+            if MSE<MSE_prec:
+                torch.save(self,"save_min_mse")
+                MSE_prec=MSE
+                
+            
+            if i<50:
+                div_cont.backward(retain_graph = True)    
+                #div.backward(retain_graph = True)
+            else:
+                div.backward(retain_graph = True)
+                #self.optimizer.param_groups[0]['lr']=1e-1
+            
             self.optimizer.step()
-
+            #scheduler.step()
             triu_Q = self._vect_to_triu(self.tril_Q, self.dim_x)
             triu_R = self._vect_to_triu(self.tril_R.repeat(self.K,1), self.dim_y)
             triu_x = self._vect_to_triu(self.tril_sigma_x, self.dim_x) 
@@ -449,8 +471,9 @@ class var_triple:
             self.sigma_x = (triu_x @ triu_x.transpose(-1,-2)).double()
             self.sigma_y = (triu_y @ triu_y.transpose(-1,-2)).double()
             
-        model_state = {'model': self, 'optimizer': self.optimizer.state_dict()}
-        torch.save(model_state,"test") 
+        #model_state = {'model': self, 'optimizer': self.optimizer.state_dict()}
+        #torch.save(model_state,"save_self_final")    
+        torch.save(self,"save_self_final2")
         print(f'\ndivergence_finale : {div}\nMSE_finale: {MSE} \ndivmin :{div_prec}')
         
         if plot:
